@@ -1,0 +1,650 @@
+﻿<!DOCTYPE html>
+<meta charset="utf-8">
+
+<head>
+	<!-- jQuery -->
+	<script src="jquery-3.2.1.min.js"></script>
+
+	<!-- Bootstrap -->
+	<link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css" >
+	<script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js" ></script>
+
+	<script src="d3.v5.min.js"></script>
+	<script src="sankey.js"></script>
+
+	<style>
+		.node rect {
+		  cursor: pointer; //move
+		  fill-opacity: .9;
+		  shape-rendering: crispEdges;
+		}
+
+		.node text {
+		  pointer-events: none;
+		  text-shadow: 0 1px 0 #fff;
+		}
+
+		.link {
+		  fill: none;
+		  stroke: #000;
+		  stroke-opacity: .2;
+		}
+
+		.link:hover {
+		  stroke-opacity: .5;
+		}
+
+		div.tooltip {
+		  position: absolute;
+		  text-align: center;
+		  //width: 60px;
+		  //height: 28px;
+		  padding: 2px;
+		  font: 12px sans-serif;
+		  background: lightsteelblue;
+		  border: 0px;
+		  border-radius: 8px;	
+		  pointer-events: none;
+		}
+	</style>
+	
+</head>
+
+<body>
+<!--h4>Tableau Extension API Test - D3 Sunburst Test</h4--->
+
+<!-- SVG content -->
+<div id="D3_Chart"></div>
+	
+<div id="configure" hide>
+	<h3>Please Configure this custom Extension</h3>
+	<ul>
+		<li>Click on the down arrow in the Extension menu (look right)</li>
+		<li>Select on Configure...</li>
+		<li>Check the Extension details and click Allow</li>
+		<li>Choose your settings</li>
+		<li>Enjoy</li>
+	</ul>  
+</div>
+	
+<script>
+	'use strict';
+	// Wrap everything in an anonymous function to avoid polluting the global namespace
+	(function () {
+		
+		// These variables will hold a reference to the unregister Event Listener functions.
+		// https://tableau.github.io/extensions-api/docs/interfaces/dashboard.html#addeventlistener
+		let unregisterSettingsEventListener = null;
+		let unregisterFilterEventListener = null;
+		let worksheet = null; //05.10.19 new code
+		let worksheetName = null;
+		var dict_Settings = [];
+		var Ordered_Dimensions = [];
+		
+		$(document).ready(function () {
+			// Added new code here to point to the configure function.
+			tableau.extensions.initializeAsync({ 'configure':configure }).then(function () {
+				getData_to_D3();
+
+				setupFilterEventListener();
+				
+				// Add settings listener here
+				// Help refresh the chart upon save from configuration dialog
+				unregisterSettingsEventListener = tableau.extensions.settings.addEventListener(tableau.TableauEventType.SettingsChanged, (settingsEvent) => {
+					getData_to_D3();
+				});
+
+			}, function () { console.log('Error while Initializing: ' + err.toString()); });
+		});		
+		
+		function getData_to_D3() {
+			
+		dict_Settings = [];
+		Ordered_Dimensions = [];
+			
+		const worksheets=tableau.extensions.dashboardContent.dashboard.worksheets;
+		// We will try to read the worksheet from the settings, if this exists we will show
+		// the configuration screen, otherwise we will clear the table and destroy the
+		// reference.
+		
+		var sheetName = tableau.extensions.settings.get("worksheet");
+
+		dict_Settings = tableau.extensions.settings.getAll();
+		console.log('dict_Settings: ', dict_Settings);
+
+		if (sheetName == undefined || sheetName =="" || sheetName == null) {
+			$("#configure").show();
+			configure();
+
+			// Exit the function if no worksheet name is present !!!
+			return;
+		} else {
+			// If a worksheet is selected, then we hide the configuration screen.
+			$("#configure").hide();
+		}
+			
+		// Use the worksheet name saved in the Settings to find and return
+		// the worksheet object.
+		var worksheet=worksheets.find(function (sheet) { 
+			return sheet.name===sheetName;
+		});
+					
+		var strMeasureName = tableau.extensions.settings.get("MeasureName");
+
+		var regExp = /\(([^)]+)\)/;
+		var regExpMatches = regExp.exec(strMeasureName);
+		//matches[1] contains the value between the parentheses
+		var strDisplayName = regExpMatches[1];
+			
+		for(var key in dict_Settings) {
+			var value = dict_Settings[key];
+
+			if (key.startsWith('FieldName_')){
+				Ordered_Dimensions.push(value);
+			}
+		}
+		console.log('----- Ordered_Dimensions -----', Ordered_Dimensions);	// Debug output
+
+		worksheet.getSummaryDataAsync().then(function (sumdata) {
+			var worksheetData = sumdata.data;			
+			console.log('----- sumdata.data -----', worksheetData);
+						
+			// Convert Tableau data into Array of Objects for D3 processing.
+			var Tableau_Array_of_Objects = ReduceToObjectTablulated(sumdata);
+			console.log('----- Display Tableau_Array_of_Objects -----', Tableau_Array_of_Objects);	// Debug output
+
+			// Reformat sankeyData for D3
+			var sankeyData = reformatSankeyData(Tableau_Array_of_Objects, Ordered_Dimensions);			
+			console.log('Debug sankeyData: ', sankeyData);
+			
+			draw_D3(sankeyData);
+
+		});
+		}
+		
+		// This opens the configuration window.
+		function configure() {
+			const popupUrl = `https://rawcdn.githack.com/nishant2912/sankey/d0554d7d805f9221fcb0ffbec57ebaf38e6f5dc3/configdialog.html`;
+			let defaultPayload = "";
+			tableau.extensions.ui.displayDialogAsync(popupUrl, defaultPayload, { height:700, width:500 }).then((closePayload) => {
+				getData_to_D3(); //0 3.30.19 test code
+			}).catch((error) => {
+				switch (error.errorCode) {
+					case tableau.ErrorCodes.DialogClosedByUser:
+					console.log("Dialog was closed by user");
+					break;
+				default:
+					console.error(error.message);
+			}
+			});
+		}
+		
+		// Passing uniqueElementCount to help with the color contrast
+		//function draw_D3(data, DimensionList, uniqueElementCount, colorChromaticScale){
+		function draw_D3(dataInput){
+			var divWidth = window.innerWidth || document.documentElement.clientWidth || document.body.clientWidth;
+			var divHeight = window.innerHeight || document.documentElement.clientHeight || document.body.clientHeight;
+
+			var units = "Sales";
+			
+			var boolDollarSign = dict_Settings['isDollarSign'];
+			var colorScale = dict_Settings['chartColorScale'];
+			var arrStepColors = steppedColorArray(colorScale, dataInput.nodes.length);
+
+			// set the dimensions and margins of the graph
+			var margin = {top: 10, right: 25, bottom: 10, left: 25},
+			    	horizontalPadding = 10,
+			        verticalPadding = 10,
+				width = divWidth - margin.left - margin.right - horizontalPadding,
+				height = divHeight - margin.top - margin.bottom - verticalPadding;
+
+			// format variables
+			var formatNumber = d3.format(",.0f"),    // zero decimal places
+				format = function(d) { 
+					var outputString = '';
+					if(boolDollarSign == 'true'){
+						outputString = '$' + formatNumber(d) + ' ' + units;
+					} else {
+						outputString = formatNumber(d) + ' ' + units;
+					}
+					
+					return outputString;
+				},
+			    	color = d3.scaleOrdinal(arrStepColors);
+
+			var filterSheet = '';
+			if( dict_Settings['FilterSheet'] != null) {
+				filterSheet = dict_Settings['FilterSheet'];
+			}
+
+			var Filter_Dimensions = [];
+			for(var key in dict_Settings) {
+				var value = dict_Settings[key];
+				if (key.startsWith('FilterFieldName_')){
+					Filter_Dimensions.push(value);
+				}
+			}
+
+			//Remove and create svg for chart refreshing
+			d3.select("svg").remove();
+
+			// append the svg object to the body of the page
+			var svg = d3.select("body").append("svg")
+				.attr("width", width + margin.left + margin.right)
+				.attr("height", height + margin.top + margin.bottom)
+				.append("g")
+				.attr("transform", 
+					  "translate(" + margin.left + "," + margin.top + ")");
+
+			// Set the sankey diagram properties
+			var sankey = d3.sankey()
+				.width(width)
+				.nodeWidth(36)
+				.nodePadding(5 + (250 / dataInput.nodes.length)) //nodePadding(40) (5)
+				.size([width, height]);
+
+			var path = sankey.link();
+
+			// Define the div for the tooltip
+			var divTooltip = d3.select("body").append("div")	
+				.attr("class", "tooltip")				
+				.style("opacity", 0);
+			
+			sankey.nodes(dataInput.nodes)
+					.links(dataInput.links)
+					.layout(32);
+
+			// add in the links
+			var link = svg.append("g").selectAll(".link")
+					.data(dataInput.links)
+					.enter().append("path")
+					.attr("class", "link")
+					.attr("d", path)
+					.style("stroke-width", function(d) { return Math.max(1, d.dy); })
+					.sort(function(a, b) { return b.dy - a.dy; });
+
+			// add the link titles
+			link.append("title")
+					.text(function(d) {
+						return d.source.name + " → " + 
+							d.target.name + "\n" + format(d.value); 
+					});
+
+			// add in the nodes
+			var node = svg.append("g").selectAll(".node")
+					.data(dataInput.nodes)
+					.enter().append("g")
+					.attr("class", "node")
+					.attr("transform", function(d) { 
+						return "translate(" + d.x + "," + d.y + ")"; })
+					.call(d3.drag()
+					.subject(function(d) {
+						return d;
+					})
+					.on("start", function() {
+						this.parentNode.appendChild(this);
+					})
+					.on("drag", dragmove))
+					.on("mouseover", function(d) {
+						divTooltip.transition()
+							//.duration(200)
+							.style("opacity", .9);
+						divTooltip.html(d.name + "<br/>" + format(d.value) )
+							.style("left", (d3.event.pageX) + "px")		
+							.style("top", (d3.event.pageY - 28) + "px");
+
+						if( Filter_Dimensions.includes(d.dimension) ) {
+							setFilterTo(filterSheet, d.dimension, [d.name]);
+						}
+					}).on("mouseout",  function(d) {
+						divTooltip.transition()
+							//.duration(200)
+							.style("opacity", 0.0);
+					});
+					//.on("mouseout",  function(d) {
+						//resetFilter('Superstore Map', Ordered_Dimensions, d.dimension);  //Temp Code 06.02.19
+					//});
+
+			// add the rectangles for the nodes
+			node.append("rect")
+					.attr("height", function(d) { return d.dy; })
+					.attr("width", sankey.nodeWidth())
+					.attr("rx", 6) // add rounded corner
+					.attr("ry", 6) // add rounded corner
+					.style("fill", function(d) { 
+						return d.color = color(d.name.replace(/ .*/, "")); })
+					.style("stroke", function(d) { 
+						return d3.rgb(d.color).darker(2); })
+					.append("title");
+					//.text(function(d) { 
+					//	return d.name + "\n" + format(d.value); 
+					//});  Implicit D3 tooltip
+
+			// add in the title for the nodes
+			node.append("text")
+					.attr("x", -6)
+					.attr("y", function(d) { return d.dy / 2; })
+					.attr("dy", ".35em")
+					.attr("text-anchor", "end")
+					.attr("transform", null)
+					.text(function(d) {
+						return d.name; })
+					.filter(function(d) { return d.x < width / 2; })
+					.attr("x", 6 + sankey.nodeWidth())
+					.attr("text-anchor", "start");
+
+			// the function for moving the nodes
+			function dragmove(d) {
+				d3.select(this)
+					.attr("transform", 
+						"translate(" + d.x + "," + (d.y = Math.max( 0, Math.min(height - d.dy, d3.event.y))) + ")"
+					);
+				sankey.relayout();
+				link.attr("d", path);
+			}
+
+		} // function draw_D3(data) block end
+		
+		// Tableau .getData() returns an array (rows) of arrays (columns) of objects, 
+		// which have a formattedValue property.
+		// Convert and flatten "Array of Arrays" to "Array of objects" in 
+		// field:values convention for easier data format for D3.
+		// This is also for understandability to imitate the closest form of tablulated data format.
+		function ReduceToObjectTablulated(TableauData){
+			var Array_Of_Objects = [];
+			
+			for (var RowIndex = 0; RowIndex < TableauData.data.length; RowIndex++) {
+				var SingleObject = new Object();
+				for (var FieldIndex = 0; FieldIndex < TableauData.data[RowIndex].length; FieldIndex++) {
+					var FieldName = TableauData.columns[FieldIndex].fieldName;
+					SingleObject[FieldName] = TableauData.data[RowIndex][FieldIndex].value;
+				}//Looping through the object number of properties (aka: Fields) in object
+				
+				Array_Of_Objects.push(SingleObject);	// Dynamically append object to the array
+			} //Looping through data array of objects.
+			
+			if(Object.keys(Array_Of_Objects[0]).length == 2) {
+				for (var index = 0; index < Array_Of_Objects.length; index++) {
+					Array_Of_Objects[index].placeholder = ' ';
+				}
+			}
+			return Array_Of_Objects;
+		}
+
+		function reformatSankeyData(arrayOfObj, DimensionOrdered){
+			var sankeyData = {"nodes" : [], "links" : []};
+
+			// Create sankey nodes
+			arrayOfObj.forEach(function (d) {
+				for(var index = 0; index < DimensionOrdered.length; index++) {
+					var objElement = { "name": d[ DimensionOrdered[index] ], 
+							   "dimension": DimensionOrdered[index] };
+					
+					if( !containsObject(objElement, sankeyData.nodes) ) {
+						sankeyData.nodes.push(objElement);
+					}
+				}
+			});
+
+			// Create sankey links
+			arrayOfObj.forEach(function (d) {
+				for(var level_Index = 1; level_Index < DimensionOrdered.length; level_Index++) {
+					var sourceNum = dimension_element_inArray(DimensionOrdered[level_Index - 1], d[ DimensionOrdered[level_Index - 1] ], sankeyData.nodes);
+					var targetNum = dimension_element_inArray(DimensionOrdered[level_Index], d[ DimensionOrdered[level_Index] ], sankeyData.nodes);
+
+					if( source_target_inArray(sourceNum, targetNum, sankeyData.links) == -1 ){
+						sankeyData.links.push({ "source": sourceNum,
+									"target": targetNum,
+									"value": +d['SUM(Sales)'] });
+					} else {
+						for(var index = 0; index < sankeyData.links.length; index++) {
+							if( sankeyData.links[index].source == sourceNum && sankeyData.links[index].target == targetNum) {
+								sankeyData.links[index].value += d['SUM(Sales)'];
+							}
+						}
+					}
+				}				
+			});
+
+			return sankeyData;
+		}
+
+		// Helper function to find link position relative to element
+		function source_target_inArray(numSource, numTarget, inputArray) {
+			var position = -1;
+			for(var index = 0; index < inputArray.length; index++) {
+				if(inputArray[index].source == numSource && inputArray[index].target == numTarget) {
+					position = index;
+				}
+			}
+			return position;
+		}
+		
+		// Helper function to find node position relative to element
+		function dimension_element_inArray(inputDimension, inputElement, inputArray) {
+			var position = -1;
+			for(var index = 0; index < inputArray.length; index++) {
+				if(inputArray[index].dimension == inputDimension && inputArray[index].name == inputElement) {
+					position = index;
+				}
+			}
+			return position;
+		}
+		
+		// Helper function to check if object is already in an array
+		function containsObject(obj, list) {
+			var i;
+			for (i = 0; i < list.length; i++) {
+				if (isEquivalent(list[i], obj)) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// Helper function is two objects are equal
+		function isEquivalent(a, b) {
+			// Create arrays of property names
+			var aProps = Object.getOwnPropertyNames(a);
+			var bProps = Object.getOwnPropertyNames(b);
+
+			// If number of properties is different,
+			// objects are not equivalent
+			if (aProps.length != bProps.length) {
+				return false;
+			}
+
+			for (var i = 0; i < aProps.length; i++) {
+				var propName = aProps[i];
+
+				// If values of same property are not equal, objects are not equivalent
+				if (a[propName] !== b[propName]) {
+					return false;
+				}
+			}
+
+			// If we made it this far, objects are considered equivalent
+			return true;
+		}
+
+		// Established stepped color scale to help the color constrast of the D3 chart
+		function steppedColorArray(ColorScaleType, uniqueElementCount) {
+			var steppedColorScale = [];
+			for(var RowIndex = 0; RowIndex < uniqueElementCount; RowIndex++){
+				//
+				switch(ColorScaleType) {
+					case 'Brown_BrightGreen':
+						steppedColorScale.push(d3.interpolateBrBG(RowIndex / uniqueElementCount));
+						break;
+					case 'Purple_Green':
+						steppedColorScale.push(d3.interpolatePRGn(RowIndex / uniqueElementCount));
+						break;
+					case 'Pink_YellowGreen':
+						steppedColorScale.push(d3.interpolatePiYG(RowIndex / uniqueElementCount));
+						break;
+					case 'Purple_Orange':
+						steppedColorScale.push(d3.interpolatePuOr(RowIndex / uniqueElementCount));
+						break;
+					case 'Red_Blue':
+						steppedColorScale.push(d3.interpolateRdBu(RowIndex / uniqueElementCount));
+						break;
+					case 'Red_Grey':
+						steppedColorScale.push(d3.interpolateRdGy(RowIndex / uniqueElementCount));
+						break;
+					case 'Red_Yellow_LightBlue':
+						steppedColorScale.push(d3.interpolateRdYlBu(RowIndex / uniqueElementCount));
+						break;
+					case 'Red_Yellow_LightGreen':
+						steppedColorScale.push(d3.interpolateRdYlGn(RowIndex / uniqueElementCount));
+						break;
+					case 'Spectral':
+						steppedColorScale.push(d3.interpolateSpectral(RowIndex / uniqueElementCount));
+						break;
+					case 'Blues':
+						steppedColorScale.push(d3.interpolateBlues(RowIndex / uniqueElementCount));
+						break;
+					case 'Greens':
+						steppedColorScale.push(d3.interpolateGreens(RowIndex / uniqueElementCount));
+						break;
+					case 'Greys':
+						steppedColorScale.push(d3.interpolateGreys(RowIndex / uniqueElementCount));
+						break;
+					case 'Oranges':
+						steppedColorScale.push(d3.interpolateOranges(RowIndex / uniqueElementCount));
+						break;
+					case 'Purples':
+						steppedColorScale.push(d3.interpolatePurples(RowIndex / uniqueElementCount));
+						break;
+					case 'Reds':
+						steppedColorScale.push(d3.interpolateReds(RowIndex / uniqueElementCount));
+						break;
+					case 'Viridis':
+						steppedColorScale.push(d3.interpolateViridis(RowIndex / uniqueElementCount));
+						break;
+					case 'Inferno':
+						steppedColorScale.push(d3.interpolateInferno(RowIndex / uniqueElementCount));
+						break;
+					case 'Magma':
+						steppedColorScale.push(d3.interpolateMagma(RowIndex / uniqueElementCount));
+						break;
+					case 'Plasma':
+						steppedColorScale.push(d3.interpolatePlasma(RowIndex / uniqueElementCount));
+						break;
+					case 'Warm':
+						steppedColorScale.push(d3.interpolateWarm(RowIndex / uniqueElementCount));
+						break;
+					case 'Cool':
+						steppedColorScale.push(d3.interpolateCool(RowIndex / uniqueElementCount));
+						break;
+					case 'Cube_Helix':
+						steppedColorScale.push(d3.interpolateCubehelixDefault(RowIndex / uniqueElementCount));
+						break;
+					case 'Blue_Green':
+						steppedColorScale.push(d3.interpolateBuGn(RowIndex / uniqueElementCount));
+						break;
+					case 'Blue_Purple':
+						steppedColorScale.push(d3.interpolateBuPu(RowIndex / uniqueElementCount));
+						break;
+					case 'Green_Blue':
+						steppedColorScale.push(d3.interpolateGnBu(RowIndex / uniqueElementCount));
+						break;
+					case 'Orange_Red':
+						steppedColorScale.push(d3.interpolateOrRd(RowIndex / uniqueElementCount));
+						break;
+					case 'Purple_Blue_Green':
+						steppedColorScale.push(d3.interpolatePuBuGn(RowIndex / uniqueElementCount));
+						break;
+					case 'Purple_Blue':
+						steppedColorScale.push(d3.interpolatePuBu(RowIndex / uniqueElementCount));
+						break;
+					case 'Purple_Red':
+						steppedColorScale.push(d3.interpolatePuRd(RowIndex / uniqueElementCount));
+						break;
+					case 'Red_Purple':
+						steppedColorScale.push(d3.interpolateRdPu(RowIndex / uniqueElementCount));
+						break;
+					case 'Yellow_Green_Blue':
+						steppedColorScale.push(d3.interpolateYlGnBu(RowIndex / uniqueElementCount));
+						break;
+					case 'Yellow_Green':
+						steppedColorScale.push(d3.interpolateYlGn(RowIndex / uniqueElementCount));
+						break;
+					case 'Yellow_Orange_Brown':
+						steppedColorScale.push(d3.interpolateYlOrBr(RowIndex / uniqueElementCount));
+						break;
+					case 'Yellow_Orange_Red':
+						steppedColorScale.push(d3.interpolateYlOrRd(RowIndex / uniqueElementCount));
+						break;
+					case 'Rainbow':
+						steppedColorScale.push(d3.interpolateRainbow(RowIndex / uniqueElementCount));
+						break;
+					case 'Sinebow':
+						steppedColorScale.push(d3.interpolateSinebow(RowIndex / uniqueElementCount));
+						break;
+
+					default:
+						steppedColorScale.push(d3.interpolateRainbow(RowIndex / uniqueElementCount));
+				}
+			}
+
+			return steppedColorScale;
+		}
+
+		// Filter the specified dimension to the specified value(s) for a target sheet in the dashboard
+		function setFilterTo(filterSheetName, filterName, values) {
+			//resetFilter(filterSheetName, filterName);
+			var sheetToFilter = tableau.extensions.dashboardContent.dashboard.worksheets.find(function (sheet) { 
+				return sheet.name === filterSheetName;
+			});
+			sheetToFilter.applyFilterAsync(filterName, values, tableau.FilterUpdateType.Replace);
+		}
+		
+		function resetFilter(filterSheetName, arrDimensionList, arrTargetFilters) {
+			var sheetToFilter = tableau.extensions.dashboardContent.dashboard.worksheets.find(function (sheet) { 
+				return sheet.name === filterSheetName;
+			});
+			
+			arrDimensionList.forEach(function(currentValue){
+				if( arrTargetFilters.includes(currentValue) ) {
+					sheetToFilter.clearFilterAsync(currentValue);	// Reset filters for sheetToFiler
+				}
+			});
+		}
+
+		function setupFilterEventListener() {
+			var FilterChange_Dimensions = [];
+			
+			// Once the settings change populate global variables from the settings.
+			worksheetName = tableau.extensions.settings.get("worksheet");
+			
+			// If settings are changed we will unregister and re register the listener.
+			if (unregisterFilterEventListener != null) {
+				unregisterFilterEventListener();
+			}
+			// Get worksheet
+			worksheet = tableau.extensions.dashboardContent.dashboard.worksheets.find(function (sheet) {
+				return sheet.name===worksheetName;
+			});
+			for(var key in dict_Settings) {
+				var value = dict_Settings[key];
+				if (key.startsWith('FilterChangeFieldName_')){
+					FilterChange_Dimensions.push(value);
+				}
+			}
+			if(worksheetName != null) {
+				// Add filter change event listener
+				unregisterFilterEventListener = worksheet.addEventListener(tableau.TableauEventType.FilterChanged, (filterEvent) => {
+					if (FilterChange_Dimensions.includes(filterEvent.fieldName)) {
+						getData_to_D3();
+					}
+				});
+			}
+		}
+
+	})();		
+</script>
+</body>
+
+<!-- Extensions Library -->
+<script src="tableau-extensions-1.latest.js"></script>
+
